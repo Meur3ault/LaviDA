@@ -1,9 +1,12 @@
-# LaViDa:A Large Diffusion Language Model for Multimodal Understanding
+# [NeurIPS 2025 Spotlight] LaViDa:A Large Diffusion Language Model for Multimodal Understanding
 
 [[Paper]](paper/paper.pdf) [[Arxiv]](https://arxiv.org/abs/2505.16839) [[Checkpoints]](https://huggingface.co/collections/jacklishufan/lavida-10-682ecf5a5fa8c5df85c61ded) [[Data]](https://huggingface.co/datasets/jacklishufan/lavida-train) [[Website]](https://homepage.jackli.org/projects/lavida/)
 
+## News
 
+**Oct 2025:** We opensourced [LaViDa-O](https://github.com/adobe-research/LaVida-O), a state-of-the-art unified multi-modal built on LaViDa
 
+**Aug 2025:** Our work was accepted to NeurIPS 2025 as a Spotlight Paper!
 
 
 ![Model Architecture](images/architecture.png)
