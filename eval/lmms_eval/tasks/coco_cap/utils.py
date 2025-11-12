@@ -50,7 +50,7 @@ def coco_aggregation_result(results, metric, args):
     # 'annotation' and 'images'
     # 'annotation' exactly reproduce the original annotation
     # 'images' however only need the image id which is contained in the file name
-    dataset = {"annotations": [], "images": []}
+    dataset = {"annotations": [], "images": [], "info":{}, "licences":[], "type": "captions"}
     idx = 0
     for result in results:
         stored_results.append({"image_id": int(result["image_id"]), "caption": result["pred"]})
