@@ -386,22 +386,33 @@ class RotaryEmbedding(nn.Module):
         self.get_rotary_embedding(config.max_sequence_length, _non_meta_init_device(config))
 
     def get_rotary_embedding(self, seq_len: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-        if (
-            (pos_sin := self.__cache.get("rope_pos_sin")) is not None
-            and (pos_cos := self.__cache.get("rope_pos_cos")) is not None
-            and pos_sin.shape[-2] >= seq_len
-            and pos_cos.shape[-2] >= seq_len
-        ):
-            if pos_sin.device != device:
-                pos_sin = pos_sin.to(device)
-                self.__cache["rope_pos_sin"] = pos_sin
-            if pos_cos.device != device:
-                pos_cos = pos_cos.to(device)
-                self.__cache["rope_pos_cos"] = pos_cos
-            return pos_sin[:, :, :seq_len, :], pos_cos[:, :, :seq_len, :]
-
-        with torch.autocast(device.type, enabled=False):
+        # 计算当前的 head_dim（如果模型被剪枝，使用 config.head_dim；否则使用 d_model // n_heads）
+        if hasattr(self.config, 'head_dim') and self.config.head_dim is not None and getattr(self.config, 'prune_model', False):
+            dim = self.config.head_dim
+        else:
             dim = self.config.d_model // self.config.n_heads
+        
+        # 检查缓存：如果存在且维度匹配，直接使用
+        cached_pos_sin = self.__cache.get("rope_pos_sin")
+        cached_pos_cos = self.__cache.get("rope_pos_cos")
+        
+        if (
+            cached_pos_sin is not None
+            and cached_pos_cos is not None
+            and cached_pos_sin.shape[-1] == dim  # 检查 head_dim 是否匹配
+            and cached_pos_sin.shape[-2] >= seq_len
+            and cached_pos_cos.shape[-2] >= seq_len
+        ):
+            if cached_pos_sin.device != device:
+                cached_pos_sin = cached_pos_sin.to(device)
+                self.__cache["rope_pos_sin"] = cached_pos_sin
+            if cached_pos_cos.device != device:
+                cached_pos_cos = cached_pos_cos.to(device)
+                self.__cache["rope_pos_cos"] = cached_pos_cos
+            return cached_pos_sin[:, :, :seq_len, :], cached_pos_cos[:, :, :seq_len, :]
+
+        # 如果缓存不存在或维度不匹配，重新计算（自动覆盖旧缓存）
+        with torch.autocast(device.type, enabled=False):
             inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, dim, 2, device=device, dtype=torch.float) / dim))
             seq = torch.arange(seq_len, device=device, dtype=torch.float)
             freqs = einsum("i , j -> i j", seq, inv_freq)
@@ -565,9 +576,13 @@ class LLaDABlock(nn.Module):
         self.act = Activation.build(config)
         assert (self.act.output_multiplier * self.hidden_size) % 1 == 0
 
+        if config.head_dim is not None and config.prune_model:
+            attnout_input_dim = config.n_heads * config.head_dim
+        else:
+            attnout_input_dim = config.d_model
         # Attention output projection.
         self.attn_out = nn.Linear(
-            config.d_model, config.d_model, bias=config.include_bias, device=config.init_device
+            attnout_input_dim, config.d_model, bias=config.include_bias, device=config.init_device
         )
 
         # Feed-forward output projection.
@@ -901,10 +916,15 @@ class LLaDALlamaBlock(LLaDABlock):
         self.__cache = cache
 
         # Attention input projection. Projects x -> (q, k, v)
-        head_dim = config.d_model // config.n_heads
-        q_proj_out_dim = config.d_model
+        if config.head_dim is not None and config.prune_model:
+            head_dim = config.head_dim
+        else:
+            head_dim = config.d_model // config.n_heads
+
+        q_proj_out_dim = config.n_heads * head_dim
         k_proj_out_dim = config.effective_n_kv_heads * head_dim
         v_proj_out_dim = config.effective_n_kv_heads * head_dim
+
         self.q_proj = nn.Linear(
             config.d_model, q_proj_out_dim, bias=config.include_bias | config.include_qkv_bias, device=config.init_device
         )

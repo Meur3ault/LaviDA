@@ -356,6 +356,17 @@ class ModelConfig():
     as "normal". Setting this to None means values are not cutoff.
     """
 
+    head_dim: Optional[int] = None
+    """
+    The dimension of each attention head. If set to None, it will be calculated as d_model // n_heads.
+    This is mainly used for pruned models where head_dim might differ from the standard calculation.
+    """
+
+    prune_model: bool = False
+    """
+    Whether the model has been pruned. If True, head_dim should be set explicitly.
+    """
+
     precision: Optional[str] = None
     """
     Precision used to train/evaluate with. You shouldn't set this directly.

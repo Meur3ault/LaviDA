@@ -4,7 +4,7 @@ export LLADA_VISION_ENCODER="google/siglip-so400m-patch14-384"
 
 set -x
 # TASKS=
-export TASKS="coco2017_cap_val"
+export TASKS="coco2017_cap_val_lite"
 export CUDA_VISIBLE_DEVICES=0
 export DEBUG_PRINT_IMAGE_RES=1
 export NOT_ALWASY_DO_2DPOOL=1 # lowres
