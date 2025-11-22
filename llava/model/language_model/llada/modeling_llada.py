@@ -1454,17 +1454,28 @@ class LLaDAModel(nn.Module):
         return LLaDAOutput(logits=logits, attn_key_values=attn_key_values, hidden_states=tuple(all_hidden_states) if output_hidden_states else None)  # type: ignore[arg-type]
 
 
-def create_model_config_from_pretrained_config(config: LLaDAConfig):
-    """
-    Utility function
-    """
+# def create_model_config_from_pretrained_config(config: LLaDAConfig):
+#     """
+#     Utility function
+#     """
 
+#     kwargs = {}
+#     for field in fields(ModelConfig):
+#         kwargs[field.name] = getattr(config, field.name)
+
+#     model_config = ModelConfig(**kwargs)
+#     return model_config
+
+def create_model_config_from_pretrained_config(config):
+#     """
+#     Utility function
+#     """
     kwargs = {}
     for field in fields(ModelConfig):
-        kwargs[field.name] = getattr(config, field.name)
-
-    model_config = ModelConfig(**kwargs)
-    return model_config
+        # Use field.default if attribute is missing
+        kwargs[field.name] = getattr(config, field.name, field.default)
+    return ModelConfig(**kwargs)
+    
 import os
 ENFORCE_NUM_ITEMIN_BATCH = os.environ.get("ENFORCE_NUM_ITEMIN_BATCH", False)
 class LLaDAModelLM(PreTrainedModel):
