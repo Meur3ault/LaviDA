@@ -84,3 +84,5 @@ class DreamConfig(PretrainedConfig):
         )
         self.mask_token_id = mask_token_id
         self.pad_token_id = pad_token_id
+        self.head_dim = kwargs.get("head_dim", self.hidden_size//self.num_attention_heads)
+        self.prune_model = kwargs.get("prune_model", False)

@@ -1,10 +1,10 @@
-LLADA_VISION_ENCODER="google/siglip-so400m-patch14-384"
+export LLADA_VISION_ENCODER="google/siglip-so400m-patch14-384"
 set -x
-export TASKS=${TASKS:-"mme"}
-export CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7,8
+export TASKS=${TASKS:-"coco2017_cap_val_lite"}
+export CUDA_VISIBLE_DEVICES=0
 export DEBUG_PRINT_IMAGE_RES=1
 # max_new_tokens
-accelerate launch --num_processes=8 --main_process_port=25511\
+accelerate launch --num_processes=1 --main_process_port=25511\
     -m lmms_eval \
     --model llava_dream \
     --model_args pretrained=$1,conv_template=dream,model_name=llava_dream \
