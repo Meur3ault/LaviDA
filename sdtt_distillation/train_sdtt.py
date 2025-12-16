@@ -56,6 +56,7 @@ def main():
         # Model
         'checkpoint_path': '/root/autodl-tmp/KAIST_CS632_Project/SDTT-Distillation/checkpoints/lavida-llada-v1.0-instruct',  # Change to your checkpoint
         #'checkpoint_path': '/root/autodl-tmp/KAIST_CS632_Project/SDTT-Distillation/LaViDa-SDTT/sdtt_distillation/outputs/sdtt_distill/lavida_checkpoints/epoch_000_loss_0.3887', # Check saved checkpoint 
+        'student_checkpoint_path': #student checkpoint path, # Check saved checkpoint 
         'model_name': 'llava_llada',
         'device': 'cuda',
         'device_map': 'cuda:0',

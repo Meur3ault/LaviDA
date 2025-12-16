@@ -35,6 +35,7 @@ class OneRoundSDTTDistiller(L.LightningModule):
 
         # Model configuration
         self.checkpoint_path = config['checkpoint_path']
+        self.student_checkpoint_path = config['student_checkpoint_path']
         self.model_name = config['model_name']
         self.device_str = config['device']
         self.device_map = config.get('device_map', 'cuda:0')
@@ -78,6 +79,15 @@ class OneRoundSDTTDistiller(L.LightningModule):
             torch_dtype=self.torch_dtype
         )
 
+        # Load the student model
+        _, self.student_model, _, _ = load_pretrained_model(
+            self.student_checkpoint_path,
+            None,
+            self.model_name,
+            device_map=self.device_map,
+            vision_kwargs=vision_kwargs,
+            torch_dtype=self.torch_dtype
+        )
         # ✨ FIX VOCAB SIZE MISMATCH
         print(f"\nChecking vocab size compatibility...")
         tokenizer_vocab_size = len(self.tokenizer)
@@ -92,19 +102,14 @@ class OneRoundSDTTDistiller(L.LightningModule):
             
             # Resize embeddings for teacher model
             self.teacher_model.resize_token_embeddings(tokenizer_vocab_size)
-            print(f"  ✓ Teacher model embeddings resized to {tokenizer_vocab_size}")
+            self.student_model.resize_token_embeddings(tokenizer_vocab_size)
+            print(f"  ✓ Teacher&Student model embeddings resized to {tokenizer_vocab_size}")
         else:
-            print(f"  ✓ Vocab sizes match")
+            print(f"  ✓ Teacher&Student Vocab sizes match")
 
-        # Create student as a copy of teacher
-        self.student_model = copy.deepcopy(self.teacher_model)
-        self.student_model.train()
-        for param in self.student_model.parameters():
-            param.requires_grad = True
-        # self.student_model = self.teacher_model # For testing on low VRAM machines
-        
         # Freeze the teacher model
         self.teacher_model.eval()
+        self.student_model.train()
         for param in self.teacher_model.parameters():
             param.requires_grad = False
 
