@@ -9,7 +9,7 @@ class PruneConfig:
     device_map: str = "cuda"
 
     # ---- 프루닝 타깃 파라미터 수(대략치) ----
-    ratio = 0.5
+    # ratio = 0.5
     ffn_manual_ratio = 0.2
     attn_head_keep_ratio = 0.9
     norm: int = 2

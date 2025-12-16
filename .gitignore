@@ -22,7 +22,7 @@ dist
 wandb
 output
 llavavid
-
+sdtt_distillation/outputs/*
 checkpoints
 project_checkpoints
 debug_checkpoints
