@@ -68,6 +68,8 @@ AVAILABLE_MODELS = {
     "whisper": "Whisper",
     "whisper_vllm": "WhisperVllm",
     "llava_llada":"Llava_Llada",
+    "llava_llada_int8":"Llava_Llada_Int8",
+    "llava_llada_int4":"Llava_Llada_Int4",
     "llava_dream":"Llava_Dream"
 }
 
