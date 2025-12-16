@@ -43,7 +43,7 @@ class OneRoundSDTTDistiller(L.LightningModule):
         self.use_fim = config.get('use_fim', False)
         
         # Distillation parameters
-        self.teacher_num_inference_steps = config.get('teacher_num_inference_steps', 32)
+        self.teacher_num_inference_steps = config.get('teacher_num_inference_steps', 64)
         self.max_new_tokens = config.get('max_new_tokens', 64)
         self.num_distill_steps = config.get('num_distill_steps', 2)  # Teacher runs 2 steps
         self.sampling_eps = config.get('sampling_eps', 1e-3)
