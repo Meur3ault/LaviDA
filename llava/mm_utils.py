@@ -271,6 +271,8 @@ def process_anyres_image(image, processor, grid_pinpoints):
 
     if type(grid_pinpoints) is list:
         possible_resolutions = grid_pinpoints
+    elif grid_pinpoints is None:
+        raise ValueError("grid_pinpoints cannot be None when using AnyRes mode. Please set a valid grid_pinpoints value.")
     else:
         possible_resolutions = ast.literal_eval(grid_pinpoints)
     best_resolution = select_best_resolution(image.size, possible_resolutions)

@@ -27,6 +27,7 @@ standalone = [
 distillation = [
     "lightning==2.6.0",
     "pytorch-lightning==2.6.0",
+    "tensorboard",
 ]
 
 train = [
