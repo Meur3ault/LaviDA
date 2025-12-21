@@ -35,7 +35,7 @@ class OneRoundSDTTDistiller(L.LightningModule):
 
         # Model configuration
         self.checkpoint_path = config['checkpoint_path']
-        self.student_checkpoint_path = config['student_checkpoint_path']
+        self.student_checkpoint_path = config.get('student_checkpoint_path', None)  # Optional student checkpoint path
         self.model_name = config['model_name']
         self.device_str = config['device']
         self.device_map = config.get('device_map', 'cuda:0')
@@ -79,33 +79,44 @@ class OneRoundSDTTDistiller(L.LightningModule):
             torch_dtype=self.torch_dtype
         )
 
-        # Load the student model
-        _, self.student_model, _, _ = load_pretrained_model(
-            self.student_checkpoint_path,
-            None,
-            self.model_name,
-            device_map=self.device_map,
-            vision_kwargs=vision_kwargs,
-            torch_dtype=self.torch_dtype
-        )
         # ✨ FIX VOCAB SIZE MISMATCH
         print(f"\nChecking vocab size compatibility...")
         tokenizer_vocab_size = len(self.tokenizer)
         model_vocab_size = self.teacher_model.get_model().transformer.wte.weight.shape[0]
         
         print(f"  Tokenizer vocab size: {tokenizer_vocab_size}")
-        print(f"  Model embedding size: {model_vocab_size}")
+        print(f"  Teacher model embedding size: {model_vocab_size}")
         
         if tokenizer_vocab_size != model_vocab_size:
             print(f"  ⚠️  Vocab size mismatch detected!")
-            print(f"  Resizing model embeddings to match tokenizer...")
-            
-            # Resize embeddings for teacher model
+            print(f"  Resizing teacher model embeddings to match tokenizer...")
             self.teacher_model.resize_token_embeddings(tokenizer_vocab_size)
-            self.student_model.resize_token_embeddings(tokenizer_vocab_size)
-            print(f"  ✓ Teacher&Student model embeddings resized to {tokenizer_vocab_size}")
+            print(f"  ✓ Teacher model embeddings resized to {tokenizer_vocab_size}")
         else:
-            print(f"  ✓ Teacher&Student Vocab sizes match")
+            print(f"  ✓ Teacher vocab size matches tokenizer")
+        
+        # Load student model from checkpoint path if provided, otherwise create as copy of teacher
+        if self.student_checkpoint_path is not None:
+            print(f"\nLoading student model from checkpoint: {self.student_checkpoint_path}")
+            _, self.student_model, _, _ = load_pretrained_model(
+                self.student_checkpoint_path,
+                None,
+                self.model_name,
+                device_map=self.device_map,
+                vision_kwargs=vision_kwargs,
+                torch_dtype=self.torch_dtype
+            )
+            
+            # Check and fix vocab size for student model
+            student_model_vocab_size = self.student_model.get_model().transformer.wte.weight.shape[0]
+            if student_model_vocab_size != tokenizer_vocab_size:
+                print(f"  Student model vocab size: {student_model_vocab_size}, resizing to {tokenizer_vocab_size}")
+                self.student_model.resize_token_embeddings(tokenizer_vocab_size)
+            print(f"  ✓ Student model loaded from checkpoint")
+        else:
+            # Create student as a copy of teacher
+            print(f"\nCreating student model as copy of teacher")
+            self.student_model = copy.deepcopy(self.teacher_model)
 
         # Freeze the teacher model
         self.teacher_model.eval()
@@ -427,11 +438,13 @@ class OneRoundSDTTDistiller(L.LightningModule):
         # ============================================================================
         # STEP 2: PROCESS MULTIMODAL INPUTS
         # ============================================================================
+        # Get image_sizes from batch if available (required for AnyRes mode)
+        image_sizes = batch.get('image_sizes', None)
         with torch.no_grad():
             (_, position_ids, attention_mask, _, inputs_embeds, labels, _) = \
                 self.teacher_model.prepare_inputs_labels_for_multimodal(
                     input_ids, None, attention_mask, None, labels,
-                    images, ['image'], image_sizes=None, return_inputs=True
+                    images, ['image'], image_sizes=image_sizes, return_inputs=True
                 )
         
         bsz, seq_len = labels.shape

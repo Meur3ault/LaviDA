@@ -54,9 +54,10 @@ def main():
     # ============================================================================
     config = {
         # Model
-        'checkpoint_path': '/root/autodl-tmp/KAIST_CS632_Project/SDTT-Distillation/checkpoints/lavida-llada-v1.0-instruct',  # Change to your checkpoint
+        'checkpoint_path': '/root/autodl-tmp/KAIST_CS632_Project/SDTT-Distillation/checkpoints/lavida-llada-v1.0-instruct',  # Teacher model checkpoint path
         #'checkpoint_path': '/root/autodl-tmp/KAIST_CS632_Project/SDTT-Distillation/LaViDa-SDTT/sdtt_distillation/outputs/sdtt_distill/lavida_checkpoints/epoch_000_loss_0.3887', # Check saved checkpoint 
-        'student_checkpoint_path': #student checkpoint path, # Check saved checkpoint 
+        'student_checkpoint_path': '/root/autodl-tmp/KAIST_CS632_Project/LaviDA-new/lavida_pruned-modified-v2/lavida_llada_pruned_3p04B-norm2-f_r0.3-a_r0.1',  # Optional: Student model checkpoint path. If None, student will be created as copy of teacher
+        #'student_checkpoint_path': '/root/autodl-tmp/KAIST_CS632_Project/LaviDA-new/lavida_pruned-modified-v2/lavida_llada_pruned_3p04B-norm2-f_r0.3-a_r0.1',  # Example: path to pruned student model
         'model_name': 'llava_llada',
         'device': 'cuda',
         'device_map': 'cuda:0',
@@ -66,14 +67,15 @@ def main():
         'use_fim': False,  # COCO captioning doesn't need FIM
         'teacher_num_inference_steps': 32,
         'max_new_tokens': 64,
+        'num_distill_steps': 2,  # Number of distillation steps (teacher runs num_distill_steps, student runs 1 step)
         
         # Training
         'learning_rate': 6e-5, # may be too small
         'weight_decay': 0.01,
-        'batch_size': 256,
+        'batch_size': 24*2,  # Reduced for AnyRes mode to prevent OOM
         'num_workers': 4,
-        'max_epochs': 20,
-        'accumulate_grad_batches': 4,
+        'max_epochs': 15,
+        'accumulate_grad_batches': 16,  # Increased to maintain effective batch size (16 * 16 = 256)
         'gradient_clip_val': 1.0,
         
         # Data
@@ -103,25 +105,44 @@ def main():
     # Initialize Model
     # ============================================================================
     print("Initializing SDTT Distiller...")
+    print(f"Teacher checkpoint: {config['checkpoint_path']}")
+    if config.get('student_checkpoint_path'):
+        print(f"Student checkpoint: {config['student_checkpoint_path']}")
+    else:
+        print("Student model: Will be created as copy of teacher")
+    
     model = OneRoundSDTTDistiller(config)
-    model_config = model.config
-    image_aspect_ratio = image_aspect_ratio = getattr(model_config, "image_aspect_ratio", "anyres")
-    print(image_aspect_ratio)
+    # Get image processing config from teacher model (which handles image processing)
+    model_config = model.teacher_model.config
+    image_aspect_ratio = getattr(model_config, "image_aspect_ratio", "anyres")
+    image_grid_pinpoints = getattr(model_config, "image_grid_pinpoints", None)
+    
+    print(f"Image aspect ratio: {image_aspect_ratio}")
+    if image_grid_pinpoints:
+        print(f"Image grid pinpoints: {image_grid_pinpoints[:2]}... (showing first 2)")
 
     # ============================================================================
     # Prepare Datasets
     # ============================================================================
     print("Loading COCO Captions dataset...")
     
+    # Convert image_grid_pinpoints from list to string if it's a list
+    if image_grid_pinpoints is not None and isinstance(image_grid_pinpoints, list):
+        image_grid_pinpoints_str = str(image_grid_pinpoints)
+    else:
+        image_grid_pinpoints_str = image_grid_pinpoints
+    
     train_data_args = TestDataArguments(
         image_folder="/root/autodl-tmp/KAIST_CS632_Project/Datasets/COCO_Captions/train2017",
         image_aspect_ratio=image_aspect_ratio,
+        image_grid_pinpoints=image_grid_pinpoints_str,
     )
     train_data_args.image_processor = model.image_processor
 
     val_data_args = TestDataArguments(
         image_folder="/root/autodl-tmp/KAIST_CS632_Project/Datasets/COCO_Captions/val2017",
         image_aspect_ratio=image_aspect_ratio,
+        image_grid_pinpoints=image_grid_pinpoints_str,
     )
     val_data_args.image_processor = model.image_processor
 
@@ -194,7 +215,7 @@ def main():
     lavida_checkpoint_callback = SaveLaViDaCheckpoint(
         save_dir=os.path.join(config['output_dir'], 'lavida_checkpoints'),
         original_checkpoint_path=config['checkpoint_path'],
-        save_every_n_epochs=1,  # Save every epoch
+        save_every_n_epochs=3,  # Save every epoch
         save_top_k=config['save_top_k'],
         monitor='train/loss',
         mode='min'
@@ -222,13 +243,15 @@ def main():
                 tags=config.get('wandb_tags', ['sdtt', 'distillation']),
                 config={
                     'teacher_steps': config['teacher_num_inference_steps'],
-                    'student_steps': config['teacher_num_inference_steps'] // 2,
+                    'student_steps': config['teacher_num_inference_steps'] // config.get('num_distill_steps', 2),
+                    'num_distill_steps': config.get('num_distill_steps', 2),
                     'learning_rate': config['learning_rate'],
                     'batch_size': config['batch_size'],
                     'accumulate_grad_batches': config['accumulate_grad_batches'],
                     'effective_batch_size': config['batch_size'] * config['accumulate_grad_batches'],
                     'max_epochs': config['max_epochs'],
                     'model': config['model_name'],
+                    'student_checkpoint_path': config.get('student_checkpoint_path', 'copy_of_teacher'),
                 }
             )
             loggers.append(wandb_logger)
@@ -243,7 +266,8 @@ def main():
     trainer = L.Trainer(
         max_epochs=config['max_epochs'],
         accelerator='gpu',
-        devices=1,
+        devices=3,
+        strategy='ddp_find_unused_parameters_true',  # Enable detection of unused parameters in DDP
         precision='bf16-mixed',
         accumulate_grad_batches=config['accumulate_grad_batches'],
         gradient_clip_val=config['gradient_clip_val'],
@@ -260,9 +284,13 @@ def main():
     # Train
     # ============================================================================
     print("\nStarting SDTT Distillation Training...")
+    num_distill_steps = config.get('num_distill_steps', 2)
+    student_steps = config['teacher_num_inference_steps'] // num_distill_steps
+    speedup = config['teacher_num_inference_steps'] / student_steps if student_steps > 0 else 1
     print(f"Teacher steps: {config['teacher_num_inference_steps']}")
-    print(f"Student steps: {config['teacher_num_inference_steps'] // 2} (2x speedup)")
+    print(f"Student steps: {student_steps} ({speedup:.1f}x speedup, num_distill_steps={num_distill_steps})")
     print(f"Batch size: {config['batch_size']} x {config['accumulate_grad_batches']} = {config['batch_size'] * config['accumulate_grad_batches']} effective")
+    print(f"Note: Reduced batch_size for AnyRes mode to prevent OOM")
     
     trainer.fit(
         model,
