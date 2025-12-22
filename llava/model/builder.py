@@ -180,7 +180,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 tokenizer = AutoTokenizer.from_pretrained(model_path)
                 model = LlavaMistralForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, **kwargs)
             elif "llada" in model_name.lower():
-                tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+                tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False,trust_remote_code = True)
                 # For pruned models, ignore size mismatches
                 if "pruned" in model_path.lower() or "pruned" in model_name.lower():
                     kwargs["ignore_mismatched_sizes"] = True

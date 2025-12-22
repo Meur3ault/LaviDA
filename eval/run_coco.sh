@@ -1,7 +1,7 @@
 
 
 export LLADA_VISION_ENCODER="google/siglip-so400m-patch14-384"
-
+model_path="/root/autodl-tmp/huggingface_cache/hub/models--jacklishufan--lavida-llada-v1.0-instruct"
 set -x
 # TASKS=
 export TASKS="coco2017_cap_val_lite"

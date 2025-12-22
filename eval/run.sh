@@ -1,7 +1,8 @@
 
 
 LLADA_VISION_ENCODER="google/siglip-so400m-patch14-384"
-
+model_path="/root/autodl-tmp/huggingface_cache/hub/models--jacklishufan--lavida-llada-v1.0-instruct"
+# model_path="/root/autodl-tmp/huggingface_cache/hub/models--jacklishufan--lavida-dream-v1.0-instruct"
 set -x
 # TASKS=
 export TASKS=${TASKS:-"pope"}
@@ -12,7 +13,7 @@ echo $TASKS
 accelerate launch --num_processes=8 \
     -m lmms_eval \
     --model llava_llada \
-    --model_args pretrained=$1,conv_template=llada,model_name=llava_llada \
+    --model_args pretrained=$model_path,conv_template=llada,model_name=llava_llada \
     --tasks $TASKS \
     --batch_size 1 \
     --gen_kwargs refix_lm=True \

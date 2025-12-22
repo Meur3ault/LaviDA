@@ -246,6 +246,7 @@ class Llava_Llada_AWQ(lmms):
         if accelerator.is_local_main_process:
             eval_logger.info("=== Starting AWQ quantization (transformer only) ===")
             eval_logger.info(f"Quantization config: w_bit={w_bit}, q_group_size={q_group_size}, no_zero_point={no_zero_point}")
+            eval_logger.info(f"Calibration: nsamples={nsamples}, dataset={calib_dataset}, backend={q_backend}")
         
         # Get quantization config
         q_config = {
@@ -256,6 +257,11 @@ class Llava_Llada_AWQ(lmms):
         # Get the language model part (transformer)
         # For AWQ, we need to work with the full model but only quantize transformer blocks
         language_model = self._model.model.transformer
+        
+        if accelerator.is_local_main_process:
+            eval_logger.info(f"Language model structure: {type(language_model)}")
+            eval_logger.info(f"Model device: {next(self._model.parameters()).device}")
+            eval_logger.info(f"Model dtype: {next(self._model.parameters()).dtype}")
         
         # Run AWQ search process
         if accelerator.is_local_main_process:
@@ -292,9 +298,36 @@ class Llava_Llada_AWQ(lmms):
                 # Temporarily replace the function
                 calib_data_module.get_calib_dataset = c4_get_calib_dataset
             
+            # Monkey patch get_blocks to support LlavaLladaForMaskedDiffusion
+            # AWQ's get_blocks doesn't recognize the multimodal wrapper, but the language model
+            # structure is the same as LLaDAModelLM (model.model.transformer.blocks)
+            from awq.quantize import pre_quant as pre_quant_module
+            original_get_blocks = pre_quant_module.get_blocks
+            
+            def patched_get_blocks(model):
+                # Check if this is a LlavaLladaForMaskedDiffusion model
+                model_class_name = model.__class__.__name__
+                if model_class_name == "LlavaLladaForMaskedDiffusion":
+                    # The language model part is at model.model.transformer.blocks
+                    # Same structure as LLaDAModelLM
+                    if hasattr(model, 'model') and hasattr(model.model, 'transformer') and hasattr(model.model.transformer, 'blocks'):
+                        return model.model.transformer.blocks
+                    else:
+                        raise ValueError(f"LlavaLladaForMaskedDiffusion model structure not recognized. "
+                                       f"Expected model.model.transformer.blocks, but got: {type(model)}")
+                # For other models, use the original function
+                return original_get_blocks(model)
+            
+            # Temporarily replace get_blocks
+            pre_quant_module.get_blocks = patched_get_blocks
+            
             try:
                 # Run AWQ - this will find optimal scales and clips
-                # AWQ's get_blocks will identify model.model.transformer.blocks for LLaDA models
+                # Our patched get_blocks will identify model.model.transformer.blocks for LlavaLladaForMaskedDiffusion
+                if accelerator.is_local_main_process:
+                    eval_logger.info(f"Model class: {self._model.__class__.__name__}")
+                    eval_logger.info(f"Language model path: model.model.transformer.blocks")
+                
                 awq_results = run_awq(
                     self._model,  # Full model, but AWQ will only quantize transformer blocks
                     enc_wrapper,
@@ -321,18 +354,55 @@ class Llava_Llada_AWQ(lmms):
                 
                 if accelerator.is_local_main_process:
                     eval_logger.info("AWQ quantization complete.")
+                    
+                # Verify quantization was applied
+                # For 'fake' backend: weights are quantized in-place but remain float
+                # For 'real' backend: WQLinear modules are created
+                quantized_found = False
+                sample_layer_name = None
+                for name, module in self._model.named_modules():
+                    # Check for real quantization (WQLinear modules)
+                    if hasattr(module, 'qweight') or hasattr(module, 'qzeros') or hasattr(module, 'scales'):
+                        quantized_found = True
+                        sample_layer_name = name
+                        if accelerator.is_local_main_process:
+                            eval_logger.info(f"Found real-quantized layer (WQLinear): {name}")
+                        break
+                    # For fake quantization, check if weight values are quantized
+                    # (weights should have limited unique values after quantization)
+                    elif isinstance(module, torch.nn.Linear) and hasattr(module, 'weight'):
+                        # Check a sample weight to see if it's quantized
+                        # Quantized weights typically have fewer unique values
+                        weight_sample = module.weight.data.flatten()[:1000]  # Sample first 1000 values
+                        unique_vals = torch.unique(weight_sample).numel()
+                        if unique_vals < len(weight_sample) * 0.1:  # Less than 10% unique values suggests quantization
+                            quantized_found = True
+                            sample_layer_name = name
+                            if accelerator.is_local_main_process:
+                                eval_logger.info(f"Found fake-quantized layer (pseudo): {name} "
+                                               f"(unique values: {unique_vals}/{len(weight_sample)})")
+                            break
+                
+                if accelerator.is_local_main_process:
+                    if quantized_found:
+                        eval_logger.info(f"✓ AWQ quantization verified. Sample layer: {sample_layer_name}")
+                    else:
+                        eval_logger.warning("⚠ WARNING: Could not verify AWQ quantization was applied! "
+                                          "This may indicate quantization did not work correctly.")
             finally:
-                # Restore original function if we patched it
+                # Restore original functions if we patched them
                 if original_get_calib_dataset is not None:
                     from awq.utils import calib_data as calib_data_module
                     calib_data_module.get_calib_dataset = original_get_calib_dataset
+                # Restore original get_blocks
+                pre_quant_module.get_blocks = original_get_blocks
                     
         except Exception as e:
             if accelerator.is_local_main_process:
-                eval_logger.warning(f"AWQ quantization failed: {e}")
+                eval_logger.error(f"AWQ quantization failed: {e}")
                 import traceback
-                eval_logger.debug(traceback.format_exc())
-            eval_logger.info("Model will continue without quantization.")
+                eval_logger.error(traceback.format_exc())
+            raise RuntimeError(f"AWQ quantization failed: {e}. Model cannot continue without quantization.") from e
 
         self._config = self._model.config
         self.model.eval()
@@ -772,5 +842,221 @@ class Llava_Llada_AWQ(lmms):
             pbar.update(1)
         
         res = re_ords.get_original(res)
+        pbar.close()
+        return res
+
+    def generate_until_multi_round(self, requests: List[Instance]) -> List[str]:
+        res = []
+        raise NotImplementedError()
+
+        def _collate(x):
+            # the negative sign on len(toks) sorts descending - this has a few advantages:
+            # - time estimates will always be over not underestimates, which is more useful for planning
+            # - to know the size of a batch when going through the list, you know the first one is always the batch
+            #   padded context length. this is useful to simplify the batching logic and more importantly to make
+            #   automatic adaptive batches much much easier to implement
+            # - any OOMs will happen right away rather than near the end
+            toks = self.tok_encode(x[0])
+            return -len(toks), x[0]
+
+        # we group requests by their generation_kwargs,
+        # so that we don't try to execute e.g. greedy sampling and temp=0.8 sampling
+        # in the same batch.
+        metadata = requests[0].metadata
+        re_ords = utils.Collator([reg.args for reg in requests], _collate, grouping=True)
+        chunks = re_ords.get_batched(n=self.batch_size, batch_fn=None)
+        num_iters = len(requests) // self.batch_size if len(requests) % self.batch_size == 0 else len(requests) // self.batch_size + 1
+        pbar = tqdm(total=num_iters, disable=(self.rank != 0), desc="Model Responding")
+
+        origin_image_aspect_ratio = getattr(self._config, "image_aspect_ratio", None)
+
+        for chunk in chunks:
+            batched_contexts, all_gen_kwargs, batched_doc_to_visual, batched_doc_to_text, batched_doc_id, batched_task, batched_split = zip(*chunk)
+            task = batched_task[0]
+            split = batched_split[0]
+            batched_visuals = [batched_doc_to_visual[0](self.task_dict[task][split][ids]) for ids in batched_doc_id]  # [B, N]
+            assert len(batched_visuals) == 1
+
+            # we assume all gen kwargs in the batch are the same
+            # this is safe to assume because the `grouper` object ensures it.
+            gen_kwargs = all_gen_kwargs[0]
+            if "until" in gen_kwargs:
+                gen_kwargs.pop("until")
+
+            # multi round inference: terminate when receiving signal from the doc_to_text
+            round_idx = 0
+            batched_round_res = []
+            batched_previous_round_info = None
+            while True:
+                question_input = []
+
+                if round_idx != 0:  # get current round visual and context from doc_to_text function
+                    batched_visuals, batched_contexts, batched_terminal_singal, batched_round_res, batched_previous_round_info = list(
+                        zip(
+                            *[
+                                batched_doc_to_text[0](
+                                    self.task_dict[task][split][ids],
+                                    previous_output=[round_res[ids_idx] for round_res in batched_round_res],
+                                    round_idx=round_idx,
+                                    previous_round_info=batched_previous_round_info[ids_idx] if batched_previous_round_info is not None else None,
+                                )
+                                for ids_idx, ids in enumerate(batched_doc_id)
+                            ]
+                        )
+                    )
+                    # import ipdb; ipdb.set_trace()
+                    batched_round_res = list(zip(*batched_round_res))  # [(r1_1, r1_2), (r2_1, r2_2), ...]
+                    if batched_terminal_singal[0]:  # terminal signal from doc_to_text function
+                        break
+
+                for visual, context in zip(batched_visuals, batched_contexts):
+                    if origin_image_aspect_ratio is not None and self._config.image_aspect_ratio != origin_image_aspect_ratio:
+                        self._config.image_aspect_ratio = origin_image_aspect_ratio
+                        eval_logger.info(f"Resetting image aspect ratio to {origin_image_aspect_ratio}")
+
+                    if visual is None or visual == []:  # for text-only tasks.
+                        visual = None
+                        task_type = "text"
+                        placeholder_count = 0
+                        image_tensor = None
+                    else:
+                        if len(visual) > 1 or "image_aspect_ratio" not in self._config.__dict__:  # for multi image case, we treat per image aspect ratio as "pad" by default.
+                            self._config.image_aspect_ratio = getattr(gen_kwargs, "image_aspect_ratio", "pad")
+                            eval_logger.info(f"In Multi-Image setting, image aspect ratio: {self._config.image_aspect_ratio}")
+
+                        if "task_type" in metadata and metadata["task_type"] == "video" and "sample_frames" in metadata:  # overwrite logic for video task with multiple static image frames
+                            assert type(visual) == list, "sample_frames must be specified for video task"
+                            sample_indices = np.linspace(0, len(visual) - 1, metadata["sample_frames"], dtype=int)
+                            visual = [visual[i] for i in sample_indices]
+                            assert len(visual) == metadata["sample_frames"]
+
+                            image_tensor = process_images(visual, self._image_processor, self._config)
+                            if type(image_tensor) is list:
+                                image_tensor = [_image.to(dtype=torch.bfloat16, device=self.device) for _image in image_tensor]
+                            else:
+                                image_tensor = image_tensor.to(dtype=torch.bfloat16, device=self.device)
+
+                            task_type = "video"
+                            placeholder_count = 1
+
+                        elif type(visual[0]) == PIL.Image.Image:  # For image, multi-image tasks
+                            image_tensor = process_images(visual, self._image_processor, self._config)
+                            if type(image_tensor) is list:
+                                image_tensor = [_image.to(dtype=torch.bfloat16, device=self.device) for _image in image_tensor]
+                            else:
+                                image_tensor = image_tensor.to(dtype=torch.bfloat16, device=self.device)
+
+                            task_type = "image"
+                            placeholder_count = len(visual) if isinstance(visual, list) else 1
+
+                        elif type(visual[0]) == str:  # For video task
+                            image_tensor = []
+                            try:
+                                if self.video_decode_backend == "decord":
+                                    frames = self.load_video(visual, self.max_frames_num)
+                                elif self.video_decode_backend == "pyav":
+                                    frames = read_video_pyav(visual[0], num_frm=self.max_frames_num)
+                                frames = self._image_processor.preprocess(frames, return_tensors="pt")["pixel_values"].half().cuda()
+                                image_tensor.append(frames)
+                            except Exception as e:
+                                eval_logger.error(f"Error {e} in loading video")
+                                image_tensor = None
+
+                            task_type = "video"
+                            placeholder_count = len(frames) if self.token_strategy == "multiple" else 1
+
+                    if image_tensor is not None and len(image_tensor) != 0 and DEFAULT_IMAGE_TOKEN not in context:
+                        """
+                        Three senarios:
+                        1. No image, and there for, no image token should be added.
+                        2. image token is already specified in the context, so we don't need to add it.
+                        3. image token is not specified in the context and there is image inputs, so we need to add it. In this case, we add the image token at the beginning of the context and add a new line.
+                        4. For video tasks, we could add a <image> token or multiple <image> tokens for each frame in the context. This depends on the training strategy and should balance in test to decide which is better
+                        """
+                        # if task_type == "image": # indeed in multi-image case, not the video in frames.
+                        #     image_tokens = [DEFAULT_IMAGE_TOKEN] * placeholder_count if isinstance(visual, list) else [DEFAULT_IMAGE_TOKEN]
+                        # elif task_type == "video":
+                        # image_tokens = [DEFAULT_IMAGE_TOKEN] * placeholder_count if self.token_strategy == "multiple" else [DEFAULT_IMAGE_TOKEN]
+                        image_tokens = [DEFAULT_IMAGE_TOKEN] * placeholder_count
+                        image_tokens = " ".join(image_tokens)
+                        question = image_tokens + "\n" + context
+                    else:
+                        question = context
+
+                    # This is much safer for llama3, as we now have some object type in it
+                    if "llama_3" in self.conv_template:
+                        conv = copy.deepcopy(conv_templates[self.conv_template])
+                    else:
+                        conv = conv_templates[self.conv_template].copy()
+
+                    if utils.is_json(question):  # conversational question input
+                        question = json.loads(question)
+                        for idx, item in enumerate(question):
+                            role = conv.roles[idx % 2]
+                            message = item["value"]
+                            conv.append_message(role, message)
+
+                        assert len(conv.messages) % 2 == 1
+                        conv.append_message(conv.roles[1], None)
+                        prompt_question = conv.get_prompt()
+                        question_input.append(prompt_question)
+                    else:  # only simple string for question
+                        conv.append_message(conv.roles[0], question)
+                        conv.append_message(conv.roles[1], None)
+                        prompt_question = conv.get_prompt()
+                        question_input.append(prompt_question)
+
+                # preconfigure gen_kwargs with defaults
+                if "max_new_tokens" not in gen_kwargs:
+                    gen_kwargs["max_new_tokens"] = 1024
+                if "temperature" not in gen_kwargs:
+                    gen_kwargs["temperature"] = 0
+                if "do_sample" not in gen_kwargs:
+                    gen_kwargs["do_sample"] = False
+                if "top_p" not in gen_kwargs:
+                    gen_kwargs["top_p"] = None
+                if "num_beams" not in gen_kwargs:
+                    gen_kwargs["num_beams"] = 1
+
+                input_ids_list = [tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt") for prompt in question_input]
+                pad_token_ids = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                input_ids = self.pad_sequence(input_ids_list, batch_first=True, padding_value=pad_token_ids).to(self.device)
+                attention_masks = input_ids.ne(pad_token_ids).to(self.device)
+
+                if task_type == "image":
+                    gen_kwargs["image_sizes"] = [batched_visuals[0][idx].size for idx in range(len(batched_visuals[0]))]
+                elif task_type == "video":
+                    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+                    keywords = [stop_str]
+                    stopping_criteria = KeywordsStoppingCriteria(keywords, self.tokenizer, input_ids)
+                    gen_kwargs["modalities"] = ["video"]
+                    gen_kwargs["stopping_criteria"] = [stopping_criteria]
+                    self._config.mm_spatial_pool_stride = self.mm_spatial_pool_stride
+                    self._config.mm_spatial_pool_mode = self.mm_spatial_pool_mode
+
+                # These steps are not in LLaVA's original code, but are necessary for generation to work
+                # TODO: attention to this major generation step...
+                if "image_aspect_ratio" in gen_kwargs.keys():
+                    gen_kwargs.pop("image_aspect_ratio")
+                try:
+                    with torch.inference_mode():
+                        cont = self.model.generate(input_ids, attention_mask=attention_masks, pad_token_id=pad_token_ids, images=image_tensor, use_cache=self.use_cache, **gen_kwargs)
+                        # cont = self.model.generate(qwen_input_ids, pad_token_id=pad_token_ids, images=image_tensor, use_cache=self.use_cache, **gen_kwargs)
+
+                    text_outputs = self.tokenizer.batch_decode(cont, skip_special_tokens=True)
+                except Exception as e:
+                    raise e
+
+                text_outputs = [response.strip() for response in text_outputs]
+                batched_round_res.append(text_outputs)
+
+                round_idx += 1
+
+            res.extend(list(zip(*batched_round_res)))
+            self.cache_hook.add_partial("generate_until_multi_round", (context, gen_kwargs), batched_round_res)
+            pbar.update(1)
+            # reorder this group of results back to original unsorted form
+        res = re_ords.get_original(res)
+
         pbar.close()
         return res

@@ -70,7 +70,17 @@ AVAILABLE_MODELS = {
     "llava_llada":"Llava_Llada",
     "llava_llada_int8":"Llava_Llada_Int8",
     "llava_llada_int4":"Llava_Llada_Int4",
-    "llava_dream":"Llava_Dream"
+    "llava_dream":"Llava_Dream",
+    "llava_llada_awq":"Llava_Llada_AWQ",
+    "llava_dream_awq":"Llava_Dream_AWQ",
+    "llava_llada_gptq":"Llava_Llada_GPTQ",
+    "llava_dream_gptq":"Llava_Dream_GPTQ",
+    "llava_llada_duquant":"Llava_Llada_DuQuant",
+    "llava_dream_duquant":"Llava_Dream_DuQuant",
+    "llava_llada_quarot":"Llava_Llada_QuaRot",
+    "llava_dream_quarot":"Llava_Dream_QuaRot",
+    "llava_llada_smoothquant":"Llava_Llada_SmoothQuant",
+    "llava_dream_smoothquant":"Llava_Dream_SmoothQuant"
 }
 
 
